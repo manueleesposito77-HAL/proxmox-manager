@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  # --- Backend Service (FastAPI) ---
+  api:
+    build: ./backend
+    container_name: nexus-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://nexus:securepass@db:5432/nexus_db
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=change_this_in_production_super_secret_key
+      - ENCRYPTION_KEY=D7pZhH9y2W3k4L5m6N7o8P9qR0sT1uV2wX3yZ4a5b6c= # Example Fernet Key
+    depends_on:
+      - db
+      - redis
+    networks:
+      - nexus-net
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # --- Frontend Service (React/Vite) ---
+  ui:
+    build: ./frontend
+    container_name: nexus-ui
+    ports:
+      - "3000:3000" # Vite default
+    environment:
+      - VITE_API_URL=http://localhost:8000/api/v1
+    depends_on:
+      - api
+    networks:
+      - nexus-net
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+  # --- Database (PostgreSQL) ---
+  db:
+    image: postgres:15-alpine
+    container_name: nexus-db
+    environment:
+      - POSTGRES_USER=nexus
+      - POSTGRES_PASSWORD=securepass
+      - POSTGRES_DB=nexus_db
+    ports:
+      - "5432:5432"
+    networks:
+      - nexus-net
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # --- Cache (Redis) ---
+  redis:
+    image: redis:7-alpine
+    container_name: nexus-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - nexus-net
+    volumes:
+      - redis_data:/data
+
+networks:
+  nexus-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
