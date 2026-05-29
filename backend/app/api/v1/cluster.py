@@ -1185,3 +1185,48 @@ def vm_interfaces(cluster_id: int, node: str, vmid: int, db: Session = Depends(g
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+# ---- Console Proxy (VNC/xterm.js) ----
+@router.post("/{cluster_id}/nodes/{node}/console")
+def node_console_proxy(cluster_id: int, node: str, db: Session = Depends(get_db)):
+    """Genera ticket per console shell del nodo (xterm.js via termproxy)."""
+    cluster = _get_cluster_or_404(cluster_id, db)
+    try:
+        svc = ProxmoxService(cluster)
+        data = svc.proxmox.nodes(node).termproxy.post()
+        return {
+            "ticket": data.get("ticket"),
+            "port": data.get("port"),
+            "node": node,
+            "host": cluster.host,
+            "pve_port": cluster.port,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/{cluster_id}/vms/{node}/{vmid}/console")
+def vm_console_proxy(cluster_id: int, node: str, vmid: int, db: Session = Depends(get_db)):
+    """Genera ticket VNC/term per console VM o CT."""
+    cluster = _get_cluster_or_404(cluster_id, db)
+    try:
+        svc = ProxmoxService(cluster)
+        handle, vtype = _vm_handle(svc, node, vmid)
+        if vtype == "lxc":
+            data = handle.termproxy.post()
+        else:
+            data = handle.vncproxy.post(websocket=1)
+        return {
+            "ticket": data.get("ticket"),
+            "port": data.get("port"),
+            "type": vtype,
+            "node": node,
+            "vmid": vmid,
+            "host": cluster.host,
+            "pve_port": cluster.port,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))

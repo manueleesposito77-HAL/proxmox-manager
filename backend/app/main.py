@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.api.v1.cluster import router as cluster_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.audit import router as audit_router
+from app.api.v1.console import router as console_router
 from app.database import engine, Base, SessionLocal
 from app.models.user import User
 from app.models.cluster import Cluster  # import per creare tabella
@@ -90,6 +91,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix=f"{settings.API_V1_STR}/auth", tags=["auth"])
 app.include_router(cluster_router, prefix=f"{settings.API_V1_STR}/clusters", tags=["clusters"])
 app.include_router(audit_router, prefix=f"{settings.API_V1_STR}/audit", tags=["audit"])
+app.include_router(console_router, prefix=f"{settings.API_V1_STR}", tags=["console"])
 
 @app.get("/")
 def root():
