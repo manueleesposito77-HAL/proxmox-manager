@@ -539,6 +539,25 @@ const LineChart = ({ data, series, height = 180, formatY }) => {
   );
 };
 
+const HtmlDescription = ({ html }) => {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!ref.current) return;
+    ref.current.querySelectorAll('a').forEach(a => {
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener noreferrer');
+    });
+  }, [html]);
+  if (!html) return null;
+  return (
+    <div
+      ref={ref}
+      className="mt-2 p-3 bg-slate-900/50 border border-slate-700 rounded-lg text-sm text-slate-300 [&_a]:text-blue-400 [&_a]:underline [&_a:hover]:text-blue-300 [&_ul]:list-disc [&_ul]:ml-4 [&_ol]:list-decimal [&_ol]:ml-4 [&_strong]:text-slate-100 [&_code]:bg-slate-800 [&_code]:px-1 [&_code]:rounded"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+};
+
 // Helper soglie: >90% rosso, >75% arancione, altrimenti colore base
 const thresholdColor = (pct, baseColor = 'bg-green-500') => {
   if (pct >= 90) return 'bg-red-500';
@@ -3001,6 +3020,7 @@ const VMDetail = ({ cluster, vm, onBack, refreshInterval = 3 }) => {
   const [error, setError] = useState(null);
   const [form, setForm] = useState({});
   const [msg, setMsg] = useState(null);
+  const [descPreview, setDescPreview] = useState(true);
 
   const fetchData = async (silent = false) => {
     if (!silent) setLoading(true);
@@ -3293,10 +3313,19 @@ const VMDetail = ({ cluster, vm, onBack, refreshInterval = 3 }) => {
             <label htmlFor="onboot" className="text-sm text-slate-300">Start at boot</label>
           </div>
           <div className="md:col-span-2">
-            <label className="text-xs text-slate-400 block mb-1">Descrizione / Note</label>
-            <textarea rows="2" value={form.description}
-              onChange={e => setForm({...form, description: e.target.value})}
-              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono"/>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-xs text-slate-400">Descrizione / Note</label>
+              <button onClick={() => setDescPreview(v => !v)}
+                className={`text-xs px-2 py-0.5 rounded border ${!descPreview ? 'border-blue-500 text-blue-400' : 'border-slate-700 text-slate-400 hover:text-slate-200'}`}>
+                Modifica
+              </button>
+            </div>
+            {descPreview
+              ? <HtmlDescription html={form.description} />
+              : <textarea rows="4" value={form.description}
+                  onChange={e => setForm({...form, description: e.target.value})}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono"/>
+            }
           </div>
         </div>
         <div className="p-4 border-t border-slate-700 flex items-center justify-between gap-4">
