@@ -1,8 +1,318 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Activity, Server, Database, HardDrive, Cpu, AlertCircle, Plus, X, Shield, ShieldOff, Loader2, Play, Square, Power, RefreshCw, Pencil, MemoryStick, Package, ArrowLeft, Download, Save, Settings, Network, Trash2, Check, Flame, GripVertical, FileText, ChevronRight, ChevronDown, Eye, EyeOff, LayoutGrid, Timer, ArrowUpDown, ArrowUp, ArrowDown, Monitor, Disc3, ListOrdered } from 'lucide-react';
 
 const API_BASE = `${window.location.protocol}//${window.location.hostname}:8000/api/v1`;
+const WS_PROTO = window.location.protocol === 'https:' ? 'wss' : 'ws';
+const WS_BASE = `${WS_PROTO}://${window.location.hostname}:8000/api/v1`;
+
+const openConsole = async (clusterId, node, vmid = 0, vtype = 'node', title = 'Console') => {
+  try {
+    let endpoint;
+    if (vtype === 'node') {
+      endpoint = `${API_BASE}/clusters/${clusterId}/nodes/${node}/console`;
+    } else {
+      endpoint = `${API_BASE}/clusters/${clusterId}/vms/${node}/${vmid}/console`;
+    }
+    const res = await axios.post(endpoint);
+    const { ticket, port, type: rtype } = res.data;
+    const actualType = rtype || vtype;
+    const isVnc = actualType === 'qemu';
+    const wsUrl = `${WS_BASE}/ws/${clusterId}/console/${node}?port=${port}&ticket=${encodeURIComponent(ticket)}&vmid=${vmid}&vtype=${actualType}`;
+
+    if (isVnc) {
+      // --- noVNC per VM QEMU (grafica) ---
+      const vncHtml = `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>${title}</title>
+<style>
+body{margin:0;background:#1e1e2e;overflow:hidden;height:100vh;display:flex;flex-direction:column}
+#top-bar{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:#0f172a;border-bottom:1px solid #334155;font:13px sans-serif;color:#94a3b8}
+#top-bar .title{font-weight:600;color:#e2e8f0}
+#top-bar .status{font-size:12px}
+#screen{flex:1;display:flex;align-items:center;justify-content:center}
+#login-overlay{position:fixed;inset:0;background:rgba(15,15,30,0.95);display:flex;align-items:center;justify-content:center;z-index:100}
+.login-box{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:28px 32px;min-width:320px;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
+.login-box h3{margin:0 0 16px;color:#e2e8f0;font-size:16px;font-weight:600}
+.login-box .subtitle{color:#64748b;font-size:12px;margin-top:-12px;margin-bottom:18px}
+.login-btns{display:flex;gap:8px;margin-top:6px}
+.login-btns button{flex:1;padding:8px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer}
+.btn-login{background:#3b82f6;color:#fff}.btn-login:hover{background:#2563eb}
+.btn-skip{background:#334155;color:#94a3b8}.btn-skip:hover{background:#475569;color:#e2e8f0}
+.btn-bar{padding:2px 8px;border:none;border-radius:4px;font-size:11px;cursor:pointer;background:#334155;color:#94a3b8}
+.btn-bar:hover{background:#475569;color:#e2e8f0}
+</style>
+</head><body>
+<div id="login-overlay">
+  <div class="login-box">
+    <h3>Console grafica (VNC)</h3>
+    <div class="subtitle">${title}</div>
+    <p style="color:#94a3b8;font-size:13px;margin:0 0 16px">La VM deve essere accesa per visualizzare il desktop.<br>Le credenziali vanno inserite nella schermata di login del sistema operativo.</p>
+    <div class="login-btns">
+      <button class="btn-login" id="btn-connect">Connetti</button>
+    </div>
+  </div>
+</div>
+<div id="top-bar">
+  <span class="title">${title} (VNC)</span>
+  <span>
+    <button class="btn-bar" id="btn-fullscreen">Fullscreen</button>
+    <button class="btn-bar" id="btn-cad">Ctrl+Alt+Del</button>
+    <button class="btn-bar" id="btn-paste">Incolla</button>
+    <button class="btn-bar" id="btn-clipboard">Clipboard</button>
+    <span class="status" id="status">Pronto</span>
+  </span>
+</div>
+<div id="clipboard-panel" style="display:none;position:fixed;top:36px;right:12px;z-index:50;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px;box-shadow:0 4px 16px rgba(0,0,0,0.4);width:320px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <span style="color:#e2e8f0;font-size:13px;font-weight:600">Clipboard</span>
+    <button id="btn-clip-close" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:16px">x</button>
+  </div>
+  <textarea id="clip-text" rows="5" style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #334155;border-radius:6px;color:#e2e8f0;font-size:13px;padding:8px;resize:vertical;font-family:monospace" placeholder="Incolla qui il testo da inviare alla VM..."></textarea>
+  <div style="display:flex;gap:6px;margin-top:8px">
+    <button id="btn-clip-send" class="btn-bar" style="flex:1;padding:6px;background:#3b82f6;color:#fff">Invia alla VM</button>
+    <button id="btn-clip-read" class="btn-bar" style="flex:1;padding:6px">Leggi da VM</button>
+  </div>
+</div>
+<div id="screen"></div>
+<script type="module">
+import RFB from 'https://esm.sh/@novnc/novnc@1.5.0/lib/rfb.js';
+
+const overlay = document.getElementById('login-overlay');
+const statusEl = document.getElementById('status');
+let rfb = null;
+
+document.getElementById('btn-connect').onclick = () => {
+  overlay.style.display = 'none';
+  statusEl.textContent = 'Connessione...';
+  statusEl.style.color = '#fbbf24';
+
+  try {
+    rfb = new RFB(document.getElementById('screen'), '${wsUrl.replace(/'/g, "\\'")}', {
+      wsProtocols: ['binary']
+    });
+    rfb.scaleViewport = true;
+    rfb.resizeSession = true;
+    rfb.focusOnClick = true;
+
+    rfb.addEventListener('connect', () => {
+      statusEl.textContent = 'Connesso';
+      statusEl.style.color = '#a6e3a1';
+    });
+    rfb.addEventListener('disconnect', (e) => {
+      statusEl.textContent = e.detail.clean ? 'Disconnesso' : 'Connessione persa';
+      statusEl.style.color = '#f38ba8';
+    });
+    rfb.addEventListener('credentialsrequired', () => {
+      rfb.sendCredentials({password: '${ticket.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'});
+    });
+  } catch (err) {
+    statusEl.textContent = 'Errore: ' + err.message;
+    statusEl.style.color = '#f38ba8';
+  }
+};
+
+document.getElementById('btn-cad').onclick = () => rfb && rfb.sendCtrlAltDel();
+document.getElementById('btn-fullscreen').onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen();
+};
+
+// Incolla rapido: legge clipboard del PC e la invia alla VM
+document.getElementById('btn-paste').onclick = async () => {
+  if (!rfb) return;
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) rfb.clipboardPasteFrom(text);
+  } catch (e) {
+    // Fallback: apri pannello clipboard
+    document.getElementById('clipboard-panel').style.display = 'block';
+  }
+};
+
+// Pannello clipboard
+const clipPanel = document.getElementById('clipboard-panel');
+const clipText = document.getElementById('clip-text');
+document.getElementById('btn-clipboard').onclick = () => {
+  clipPanel.style.display = clipPanel.style.display === 'none' ? 'block' : 'none';
+};
+document.getElementById('btn-clip-close').onclick = () => { clipPanel.style.display = 'none'; };
+document.getElementById('btn-clip-send').onclick = () => {
+  if (rfb && clipText.value) {
+    rfb.clipboardPasteFrom(clipText.value);
+    clipPanel.style.display = 'none';
+  }
+};
+document.getElementById('btn-clip-read').onclick = () => {
+  // Il testo dalla VM viene aggiornato tramite evento clipboard
+};
+if (typeof rfb !== 'undefined' && rfb) {
+  rfb.addEventListener('clipboard', (e) => { clipText.value = e.detail.text; });
+}
+// Imposta listener clipboard dopo connessione
+const origConnect = document.getElementById('btn-connect').onclick;
+const patchClipboard = setInterval(() => {
+  if (rfb) {
+    rfb.addEventListener('clipboard', (e) => { clipText.value = e.detail.text; });
+    clearInterval(patchClipboard);
+  }
+}, 500);
+<\/script></body></html>`;
+
+      const win = window.open('', '_blank', 'width=1024,height=768');
+      if (win) { win.document.write(vncHtml); win.document.close(); }
+      else alert('Popup bloccato dal browser. Consenti i popup per questo sito.');
+      return;
+    }
+
+    const consoleHtml = `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>${title}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"><\/script>
+<style>
+body{margin:0;background:#1e1e2e;overflow:hidden;height:100vh}
+#terminal{width:100%;height:100%}.xterm{height:100%;padding:4px}
+.status{position:fixed;top:8px;right:12px;font:12px monospace;color:#888;z-index:10}
+#login-overlay{position:fixed;inset:0;background:rgba(15,15,30,0.95);display:flex;align-items:center;justify-content:center;z-index:100}
+.login-box{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:28px 32px;min-width:320px;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
+.login-box h3{margin:0 0 6px;color:#e2e8f0;font-size:16px;font-weight:600}
+.login-box .subtitle{color:#64748b;font-size:12px;margin-bottom:18px}
+.login-box label{display:block;color:#94a3b8;font-size:12px;margin-bottom:4px;font-weight:500}
+.login-box input{width:100%;box-sizing:border-box;padding:8px 10px;margin-bottom:12px;background:#0f172a;border:1px solid #334155;border-radius:6px;color:#e2e8f0;font-size:14px;font-family:inherit;outline:none}
+.login-box input:focus{border-color:#3b82f6}
+.login-btns{display:flex;gap:8px;margin-top:6px}
+.login-btns button{flex:1;padding:8px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer}
+.btn-login{background:#3b82f6;color:#fff}.btn-login:hover{background:#2563eb}
+.btn-skip{background:#334155;color:#94a3b8}.btn-skip:hover{background:#475569;color:#e2e8f0}
+</style>
+</head><body>
+<div class="status" id="status">Connessione...</div>
+${actualType !== 'node' ? `<div id="login-overlay">
+  <div class="login-box">
+    <h3>Credenziali di accesso</h3>
+    <div class="subtitle">${title}</div>
+    <label for="realm">Realm</label>
+    <select id="realm" style="width:100%;box-sizing:border-box;padding:8px 10px;margin-bottom:12px;background:#0f172a;border:1px solid #334155;border-radius:6px;color:#e2e8f0;font-size:14px;outline:none">
+      <option value="linux">Linux (login di sistema)</option>
+      <option value="pam">Linux PAM standard authentication</option>
+      <option value="pve">Proxmox VE authentication</option>
+    </select>
+    <label for="user">Username</label>
+    <input type="text" id="user" value="root" autocomplete="username" spellcheck="false">
+    <label for="pass">Password</label>
+    <input type="password" id="pass" autocomplete="current-password">
+    <div class="login-btns">
+      <button class="btn-skip" id="btn-skip">Salta</button>
+      <button class="btn-login" id="btn-login">Accedi</button>
+    </div>
+  </div>
+</div>` : ''}
+<div id="terminal"></div>
+<script>
+const term = new Terminal({cursorBlink:true,fontSize:14,fontFamily:'JetBrains Mono,Fira Code,monospace',theme:{background:'#1e1e2e',foreground:'#cdd6f4'}});
+const fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+term.open(document.getElementById('terminal'));
+fitAddon.fit();
+window.addEventListener('resize',()=>fitAddon.fit());
+
+const isNode = '${actualType}' === 'node';
+let pendingLogin = null;
+let wsReady = false;
+let outputBuffer = '';
+const overlay = document.getElementById('login-overlay');
+const userInput = document.getElementById('user');
+const passInput = document.getElementById('pass');
+
+function sendStr(s) { if (ws.readyState === 1) ws.send('0:' + s.length + ':' + s); }
+
+if (!isNode && overlay) {
+  function doLogin() {
+    const realm = document.getElementById('realm').value;
+    let u = userInput.value.trim();
+    const p = passInput.value;
+    if (realm !== 'linux' && u && !u.includes('@')) {
+      u = u + '@' + realm;
+    }
+    overlay.style.display = 'none';
+    term.focus();
+    if (u || p) {
+      pendingLogin = { user: u, pass: p, sentUser: false, sentPass: false };
+      if (wsReady) sendStr(u + '\\r');
+    }
+  }
+
+  document.getElementById('btn-login').onclick = doLogin;
+  document.getElementById('btn-skip').onclick = () => {
+    overlay.style.display = 'none';
+    term.focus();
+  };
+  passInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+  userInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') passInput.focus(); });
+  setTimeout(() => passInput.focus(), 100);
+}
+
+const ws = new WebSocket('${wsUrl.replace(/'/g, "\\'")}');
+const statusEl = document.getElementById('status');
+
+ws.onopen = () => {
+  statusEl.textContent = 'Connesso';
+  statusEl.style.color = '#a6e3a1';
+  setTimeout(() => statusEl.style.display = 'none', 2000);
+  const dims = fitAddon.proposeDimensions();
+  if (dims) ws.send('1:' + dims.cols + ':' + dims.rows + ':');
+  wsReady = true;
+  if (isNode) term.focus();
+  // Se l'utente ha già cliccato Login prima che il WS fosse pronto
+  if (pendingLogin && pendingLogin.user) setTimeout(() => sendStr(pendingLogin.user + '\\r'), 800);
+};
+
+ws.onmessage = (ev) => {
+  const data = ev.data;
+  if (data && data.length > 0) {
+    term.write(data);
+    // Auto-login: attendi prompt password e invia
+    if (pendingLogin && !pendingLogin.sentPass) {
+      outputBuffer += data;
+      if (/password/i.test(outputBuffer)) {
+        sendStr(pendingLogin.pass + '\\r');
+        pendingLogin.sentPass = true;
+        pendingLogin = null;
+        outputBuffer = '';
+      }
+      // Limita buffer
+      if (outputBuffer.length > 500) outputBuffer = outputBuffer.slice(-200);
+    }
+  }
+};
+
+ws.onerror = () => { statusEl.textContent = 'Errore connessione'; statusEl.style.color = '#f38ba8'; };
+ws.onclose = () => { statusEl.textContent = 'Disconnesso'; statusEl.style.color = '#f38ba8'; statusEl.style.display = 'block'; term.write('\\r\\n\\x1b[31mConnessione chiusa.\\x1b[0m\\r\\n'); };
+
+term.onData((data) => {
+  if (ws.readyState === 1) ws.send('0:' + data.length + ':' + data);
+});
+
+term.onResize(({cols, rows}) => {
+  if (ws.readyState === 1) ws.send('1:' + cols + ':' + rows + ':');
+});
+<\/script></body></html>`;
+
+    const win = window.open('', '_blank', 'width=900,height=600');
+    if (win) {
+      win.document.write(consoleHtml);
+      win.document.close();
+    } else {
+      alert('Popup bloccato dal browser. Consenti i popup per questo sito.');
+    }
+  } catch (err) {
+    alert(typeof traduciErrore === 'function' ? traduciErrore(err) : (err.message || 'Errore apertura console'));
+  }
+};
 
 const traduciErrore = (err) => {
   const msg = err.response?.data?.detail || err.message || String(err);
@@ -172,8 +482,20 @@ const formatUptime = (seconds) => {
   return `${m}m`;
 };
 
-const LineChart = ({ data, series, width = 700, height = 180, formatY }) => {
-  if (!data || data.length === 0) return <div className="text-slate-500 text-sm p-4">Nessun dato</div>;
+const LineChart = ({ data, series, height = 180, formatY }) => {
+  const containerRef = useRef(null);
+  const [width, setWidth] = useState(500);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    setWidth(el.getBoundingClientRect().width || 500);
+    const ro = new ResizeObserver(entries => setWidth(entries[0].contentRect.width));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  if (!data || data.length === 0) return <div ref={containerRef} className="text-slate-500 text-sm p-4">Nessun dato</div>;
   const padL = 60, padR = 10, padT = 10, padB = 30;
   const w = width - padL - padR, h = height - padT - padB;
   const times = data.map(d => d.time);
@@ -186,32 +508,34 @@ const LineChart = ({ data, series, width = 700, height = 180, formatY }) => {
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => vMax * f);
   const xticks = 5;
   return (
-    <svg width={width} height={height} className="block">
-      {ticks.map((t, i) => (
-        <g key={i}>
-          <line x1={padL} y1={y(t)} x2={padL+w} y2={y(t)} stroke="#334155" strokeDasharray="2 2"/>
-          <text x={padL-6} y={y(t)+3} textAnchor="end" fontSize="10" fill="#64748b">{fmt(t)}</text>
-        </g>
-      ))}
-      {Array.from({length: xticks}, (_, i) => {
-        const t = tMin + (tMax-tMin)*(i/(xticks-1));
-        const d = new Date(t*1000);
-        const label = d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');
-        return <text key={i} x={x(t)} y={height-10} textAnchor="middle" fontSize="10" fill="#64748b">{label}</text>;
-      })}
-      {series.map(s => {
-        const path = data.map((d, i) => `${i===0?'M':'L'} ${x(d.time)} ${y(d[s.key]||0)}`).join(' ');
-        return <path key={s.key} d={path} fill="none" stroke={s.color} strokeWidth="2"/>;
-      })}
-      <g transform={`translate(${padL}, 2)`}>
-        {series.map((s, i) => (
-          <g key={s.key} transform={`translate(${i*110}, 0)`}>
-            <rect width="10" height="3" fill={s.color} y="4"/>
-            <text x="14" y="9" fontSize="10" fill="#94a3b8">{s.label}</text>
+    <div ref={containerRef} style={{ width: '100%' }}>
+      <svg width={width} height={height} className="block">
+        {ticks.map((t, i) => (
+          <g key={i}>
+            <line x1={padL} y1={y(t)} x2={padL+w} y2={y(t)} stroke="#334155" strokeDasharray="2 2"/>
+            <text x={padL-6} y={y(t)+3} textAnchor="end" fontSize="10" fill="#64748b">{fmt(t)}</text>
           </g>
         ))}
-      </g>
-    </svg>
+        {Array.from({length: xticks}, (_, i) => {
+          const t = tMin + (tMax-tMin)*(i/(xticks-1));
+          const d = new Date(t*1000);
+          const label = d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');
+          return <text key={i} x={x(t)} y={height-10} textAnchor="middle" fontSize="10" fill="#64748b">{label}</text>;
+        })}
+        {series.map(s => {
+          const path = data.map((d, i) => `${i===0?'M':'L'} ${x(d.time)} ${y(d[s.key]||0)}`).join(' ');
+          return <path key={s.key} d={path} fill="none" stroke={s.color} strokeWidth="2"/>;
+        })}
+        <g transform={`translate(${padL}, 2)`}>
+          {series.map((s, i) => (
+            <g key={s.key} transform={`translate(${i*110}, 0)`}>
+              <rect width="10" height="3" fill={s.color} y="4"/>
+              <text x="14" y="9" fontSize="10" fill="#94a3b8">{s.label}</text>
+            </g>
+          ))}
+        </g>
+      </svg>
+    </div>
   );
 };
 
@@ -541,27 +865,27 @@ const NodeDetail = ({ cluster, nodeName, onBack, onSelectVM, refreshInterval = 3
         <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">Traffico di Rete (B/s)</div>
-            <LineChart data={rrd} width={500} series={[
+            <LineChart data={rrd} series={[
               {key:'netin', label:'IN', color:'#3b82f6'},
               {key:'netout', label:'OUT', color:'#8b5cf6'}
             ]} formatY={v => formatBytes(v)+'/s'}/>
           </div>
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">CPU (%)</div>
-            <LineChart data={rrd.map(d => ({...d, cpupct: (d.cpu||0)*100}))} width={500} series={[
+            <LineChart data={rrd.map(d => ({...d, cpupct: (d.cpu||0)*100}))} series={[
               {key:'cpupct', label:'CPU', color:'#10b981'}
             ]} formatY={v => v.toFixed(0)+'%'}/>
           </div>
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">Memoria (B)</div>
-            <LineChart data={rrd} width={500} series={[
+            <LineChart data={rrd} series={[
               {key:'memused', label:'Used', color:'#f59e0b'},
               {key:'memtotal', label:'Total', color:'#64748b'}
             ]} formatY={v => formatBytes(v)}/>
           </div>
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">Load Average</div>
-            <LineChart data={rrd} width={500} series={[
+            <LineChart data={rrd} series={[
               {key:'loadavg', label:'Load', color:'#ec4899'}
             ]} formatY={v => v.toFixed(2)}/>
           </div>
@@ -897,9 +1221,8 @@ const NodeDetail = ({ cluster, nodeName, onBack, onSelectVM, refreshInterval = 3
           }} title="Shutdown nodo" className="flex items-center gap-1 px-3 py-1.5 bg-red-700 hover:bg-red-600 rounded-lg text-xs font-medium text-white">
             <Power className="w-3.5 h-3.5"/> Shutdown
           </button>
-          <button onClick={() => {
-            window.open(`https://${cluster.host}:${cluster.port}/?console=shell&novnc=1&node=${nodeName}&resize=off`, '_blank');
-          }} title="Console nodo" className="flex items-center gap-1 px-3 py-1.5 bg-blue-700 hover:bg-blue-600 rounded-lg text-xs font-medium text-white">
+          <button onClick={() => openConsole(cluster.id, nodeName, 0, 'node', `Shell — ${nodeName}`)}
+            title="Console nodo" className="flex items-center gap-1 px-3 py-1.5 bg-blue-700 hover:bg-blue-600 rounded-lg text-xs font-medium text-white">
             <Monitor className="w-3.5 h-3.5"/> Console
           </button>
           <button onClick={fetchData} className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white">
@@ -2137,11 +2460,17 @@ const VMBootOrderSection = ({ cluster, vm, config, onChange }) => {
   );
 };
 
-const VMDisksSection = ({ cluster, vm, config, diskKeys, onChange }) => {
+const VMDisksSection = ({ cluster, vm, vtype, config, diskKeys, onChange }) => {
   const [cdromEditing, setCdromEditing] = useState(null);
   const [isoList, setIsoList] = useState([]);
   const [selectedIso, setSelectedIso] = useState('');
   const [cdromBusy, setCdromBusy] = useState(false);
+  const [addMode, setAddMode] = useState(null); // 'cdrom' | 'disk' | null
+  const [addBusy, setAddBusy] = useState(false);
+  const [addForm, setAddForm] = useState({ bus: 'ide', storage: '', size: '32', iso: '' });
+  const [storageList, setStorageList] = useState([]);
+  const [addIsoList, setAddIsoList] = useState([]);
+  const isLxc = vtype === 'lxc';
 
   const loadIsos = async (slot) => {
     setCdromEditing(slot);
@@ -2185,11 +2514,148 @@ const VMDisksSection = ({ cluster, vm, config, diskKeys, onChange }) => {
     finally { setCdromBusy(false); }
   };
 
+  const openAddForm = async (mode) => {
+    setAddMode(mode);
+    setAddForm({ bus: mode === 'cdrom' ? 'ide' : (isLxc ? 'mp' : 'scsi'), storage: '', size: '32', iso: '', mountpoint: '/mnt/data' });
+    setStorageList([]);
+    setAddIsoList([]);
+    try {
+      const stRes = await axios.get(`${API_BASE}/clusters/${cluster.id}/nodes/${vm.node}/storage`);
+      const stores = (stRes.data || []).filter(s => s.active);
+      if (mode === 'cdrom') {
+        const isoStores = stores.filter(s => (s.content || '').includes('iso'));
+        setStorageList(isoStores);
+        let allIsos = [];
+        for (const s of isoStores) {
+          try {
+            const cRes = await axios.get(`${API_BASE}/clusters/${cluster.id}/nodes/${vm.node}/storage/${s.storage}/content?content_type=iso`);
+            (cRes.data || []).forEach(f => allIsos.push({ volid: f.volid, label: `${f.volid}` }));
+          } catch {}
+        }
+        setAddIsoList(allIsos);
+      } else {
+        setStorageList(stores.filter(s => (s.content || '').includes('images') || (s.content || '').includes('rootdir')));
+      }
+    } catch {}
+  };
+
+  const nextFreeSlot = (bus) => {
+    const used = new Set(diskKeys.filter(k => k.startsWith(bus)).map(k => parseInt(k.replace(bus, '')) || 0));
+    let idx = 0;
+    while (used.has(idx)) idx++;
+    return `${bus}${idx}`;
+  };
+
+  const addDevice = async () => {
+    setAddBusy(true);
+    try {
+      let slot, value;
+      if (addMode === 'cdrom') {
+        slot = nextFreeSlot(addForm.bus);
+        value = addForm.iso ? `${addForm.iso},media=cdrom` : 'none,media=cdrom';
+      } else if (isLxc) {
+        slot = nextFreeSlot('mp');
+        if (!addForm.storage) { alert('Seleziona uno storage'); setAddBusy(false); return; }
+        value = `${addForm.storage}:${addForm.size},mp=${addForm.mountpoint}`;
+      } else {
+        slot = nextFreeSlot(addForm.bus);
+        if (!addForm.storage) { alert('Seleziona uno storage'); setAddBusy(false); return; }
+        value = `${addForm.storage}:${addForm.size}`;
+      }
+      await axios.put(`${API_BASE}/clusters/${cluster.id}/vms/${vm.node}/${vm.vmid}/config`, {
+        [slot]: value
+      });
+      setAddMode(null);
+      onChange();
+    } catch (err) { alert(traduciErrore(err)); }
+    finally { setAddBusy(false); }
+  };
+
   return (
     <div className="bg-slate-800 rounded-lg border border-slate-700 overflow-hidden mb-6" style={{order: 0}}>
-      <div className="p-4 border-b border-slate-700 font-bold flex items-center gap-2">
-        <HardDrive className="w-4 h-4"/> Dischi / Volumi
+      <div className="p-4 border-b border-slate-700 font-bold flex items-center justify-between">
+        <span className="flex items-center gap-2"><HardDrive className="w-4 h-4"/> Dischi / Volumi</span>
+        <div className="flex gap-1">
+          {!isLxc && (
+            <button onClick={() => addMode === 'cdrom' ? setAddMode(null) : openAddForm('cdrom')}
+              className="flex items-center gap-1 px-2 py-1 bg-blue-700 hover:bg-blue-600 rounded text-xs text-white">
+              <Plus className="w-3 h-3"/> CD-ROM
+            </button>
+          )}
+          <button onClick={() => addMode === 'disk' ? setAddMode(null) : openAddForm('disk')}
+            className="flex items-center gap-1 px-2 py-1 bg-purple-700 hover:bg-purple-600 rounded text-xs text-white">
+            <Plus className="w-3 h-3"/> {isLxc ? 'Mount Point' : 'Disco'}
+          </button>
+        </div>
       </div>
+      {addMode && (
+        <div className="p-4 bg-slate-900/50 border-b border-slate-700">
+          <div className="text-sm font-semibold mb-3 flex items-center gap-2">
+            {addMode === 'cdrom' ? <><Disc3 className="w-4 h-4 text-blue-400"/> Aggiungi CD-ROM</> : <><HardDrive className="w-4 h-4 text-purple-400"/> Aggiungi Disco</>}
+          </div>
+          <div className="flex flex-wrap items-end gap-3">
+            {!isLxc && (
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Bus</label>
+                <select value={addForm.bus} onChange={e => setAddForm({...addForm, bus: e.target.value})}
+                  className="bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-200">
+                  {addMode === 'cdrom'
+                    ? <><option value="ide">IDE</option><option value="sata">SATA</option><option value="scsi">SCSI</option></>
+                    : <><option value="scsi">SCSI</option><option value="virtio">VirtIO</option><option value="ide">IDE</option><option value="sata">SATA</option></>
+                  }
+                </select>
+              </div>
+            )}
+            {addMode === 'disk' && (
+              <>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Storage</label>
+                  <select value={addForm.storage} onChange={e => setAddForm({...addForm, storage: e.target.value})}
+                    className="bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-200 min-w-[150px]">
+                    <option value="">— Seleziona —</option>
+                    {storageList.map(s => <option key={s.storage} value={s.storage}>{s.storage}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Dimensione (GB)</label>
+                  <input type="number" min="1" value={addForm.size} onChange={e => setAddForm({...addForm, size: e.target.value})}
+                    className="bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-200 w-24"/>
+                </div>
+              </>
+            )}
+            {addMode === 'disk' && isLxc && (
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Mount Point</label>
+                <input type="text" value={addForm.mountpoint} onChange={e => setAddForm({...addForm, mountpoint: e.target.value})}
+                  placeholder="/mnt/data"
+                  className="bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm text-slate-200 w-40"/>
+              </div>
+            )}
+            {addMode === 'cdrom' && (
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">ISO (opzionale)</label>
+                <select value={addForm.iso} onChange={e => setAddForm({...addForm, iso: e.target.value})}
+                  className="bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm font-mono text-slate-200 min-w-[300px]">
+                  <option value="">— Vuoto (nessuna ISO) —</option>
+                  {addIsoList.map(iso => <option key={iso.volid} value={iso.volid}>{iso.label}</option>)}
+                </select>
+              </div>
+            )}
+            <div className="flex gap-2">
+              <button onClick={addDevice} disabled={addBusy || (addMode === 'disk' && !addForm.storage)}
+                className="flex items-center gap-1 px-3 py-1.5 bg-green-700 hover:bg-green-600 rounded text-xs text-white disabled:opacity-50">
+                {addBusy ? <Loader2 className="w-3 h-3 animate-spin"/> : <Check className="w-3 h-3"/>} Aggiungi
+              </button>
+              <button onClick={() => setAddMode(null)}
+                className="flex items-center gap-1 px-3 py-1.5 bg-slate-600 hover:bg-slate-500 rounded text-xs text-white">
+                <X className="w-3 h-3"/> Annulla
+              </button>
+            </div>
+          </div>
+          {addMode === 'cdrom' && addIsoList.length === 0 && <p className="text-xs text-slate-500 mt-2">Nessuna ISO trovata. Il CD-ROM verrà creato vuoto.</p>}
+          {addMode === 'disk' && storageList.length === 0 && <p className="text-xs text-slate-500 mt-2">Caricamento storage...</p>}
+        </div>
+      )}
       {diskKeys.length === 0 ? (
         <div className="p-4 text-sm text-slate-500">Nessun disco</div>
       ) : (
@@ -2683,10 +3149,8 @@ const VMDetail = ({ cluster, vm, onBack, refreshInterval = 3 }) => {
               </button>
             </>
           )}
-          <button onClick={() => {
-            const ctype = vtype === 'lxc' ? 'lxc' : 'kvm';
-            window.open(`https://${cluster.host}:${cluster.port}/?console=${ctype}&novnc=1&vmid=${vm.vmid}&vmname=${encodeURIComponent(vm.name)}&node=${vm.node}&resize=off`, '_blank');
-          }} className="flex items-center gap-2 px-3 py-2 bg-blue-700 hover:bg-blue-600 rounded-lg text-sm">
+          <button onClick={() => openConsole(cluster.id, vm.node, vm.vmid, vtype, `Console — ${vm.name} #${vm.vmid}`)}
+            className="flex items-center gap-2 px-3 py-2 bg-blue-700 hover:bg-blue-600 rounded-lg text-sm">
             <Monitor className="w-4 h-4"/> Console
           </button>
         </div>
@@ -2721,27 +3185,27 @@ const VMDetail = ({ cluster, vm, onBack, refreshInterval = 3 }) => {
         <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">CPU (%)</div>
-            <LineChart data={rrd.map(d => ({...d, cpupct:(d.cpu||0)*100}))} width={500} series={[
+            <LineChart data={rrd.map(d => ({...d, cpupct:(d.cpu||0)*100}))} series={[
               {key:'cpupct', label:'CPU', color:'#10b981'}
             ]} formatY={v => v.toFixed(0)+'%'}/>
           </div>
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">Memoria (B)</div>
-            <LineChart data={rrd} width={500} series={[
+            <LineChart data={rrd} series={[
               {key:'mem', label:'Used', color:'#f59e0b'},
               {key:'maxmem', label:'Max', color:'#64748b'}
             ]} formatY={v => formatBytes(v)}/>
           </div>
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">Traffico di Rete (B/s)</div>
-            <LineChart data={rrd} width={500} series={[
+            <LineChart data={rrd} series={[
               {key:'netin', label:'IN', color:'#3b82f6'},
               {key:'netout', label:'OUT', color:'#8b5cf6'}
             ]} formatY={v => formatBytes(v)+'/s'}/>
           </div>
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">Disco I/O (B/s)</div>
-            <LineChart data={rrd} width={500} series={[
+            <LineChart data={rrd} series={[
               {key:'diskread', label:'Read', color:'#06b6d4'},
               {key:'diskwrite', label:'Write', color:'#ec4899'}
             ]} formatY={v => formatBytes(v)+'/s'}/>
@@ -2853,7 +3317,7 @@ const VMDetail = ({ cluster, vm, onBack, refreshInterval = 3 }) => {
       )}
 
       {vmIsVisible('disks') && (
-      <div style={{order: vmOrder('disks')}}><VMDisksSection cluster={cluster} vm={vm} config={config} diskKeys={diskKeys} onChange={fetchData}/></div>
+      <div style={{order: vmOrder('disks')}}><VMDisksSection cluster={cluster} vm={vm} vtype={vtype} config={config} diskKeys={diskKeys} onChange={fetchData}/></div>
       )}
 
       {vmIsVisible('boot') && !isLxc && (
@@ -3916,27 +4380,27 @@ const ClusterDetail = ({ cluster, onSelectNode, onSelectVM, refreshInterval = 3 
         <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">CPU medio (%)</div>
-            <LineChart data={rrdAgg} width={500} series={[
+            <LineChart data={rrdAgg} series={[
               {key:'cpupct', label:'CPU avg', color:'#10b981'}
             ]} formatY={v => v.toFixed(0)+'%'}/>
           </div>
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">Memoria totale cluster (B)</div>
-            <LineChart data={rrdAgg} width={500} series={[
+            <LineChart data={rrdAgg} series={[
               {key:'memused', label:'Used', color:'#f59e0b'},
               {key:'memtotal', label:'Total', color:'#64748b'}
             ]} formatY={v => formatBytes(v)}/>
           </div>
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">Traffico di Rete aggregato (B/s)</div>
-            <LineChart data={rrdAgg} width={500} series={[
+            <LineChart data={rrdAgg} series={[
               {key:'netin', label:'IN', color:'#3b82f6'},
               {key:'netout', label:'OUT', color:'#8b5cf6'}
             ]} formatY={v => formatBytes(v)+'/s'}/>
           </div>
           <div>
             <div className="text-xs text-slate-400 mb-2 font-medium">Load Average sommato</div>
-            <LineChart data={rrdAgg} width={500} series={[
+            <LineChart data={rrdAgg} series={[
               {key:'loadavg', label:'Load', color:'#ec4899'}
             ]} formatY={v => v.toFixed(2)}/>
           </div>
@@ -4067,10 +4531,8 @@ const ClusterDetail = ({ cluster, onSelectNode, onSelectVM, refreshInterval = 3 
                           </button>
                         </>
                       )}
-                      <button onClick={() => {
-                        const ctype = vm.type === 'lxc' ? 'lxc' : 'kvm';
-                        window.open(`https://${cluster.host}:${cluster.port}/?console=${ctype}&novnc=1&vmid=${vm.vmid}&vmname=${encodeURIComponent(vm.name)}&node=${vm.node}&resize=off`, '_blank');
-                      }} title="Console" className="p-1.5 rounded hover:bg-blue-900/40 text-blue-400">
+                      <button onClick={() => openConsole(cluster.id, vm.node, vm.vmid, vm.type === 'lxc' ? 'lxc' : 'qemu', `Console — ${vm.name} #${vm.vmid}`)}
+                        title="Console" className="p-1.5 rounded hover:bg-blue-900/40 text-blue-400">
                         <Monitor className="w-4 h-4"/>
                       </button>
                     </div>
